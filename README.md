@@ -1,5 +1,7 @@
 # Sandfleet
 
+> Warning: this repo is fairly vibecoded, so mileage may vary. Feel free to open issues but maintenance is not guaranteed.
+
 Sandfleet provides lease-based, resource-isolated sandboxes backed by Slurm
 allocations and Apptainer. A small control plane launches CPU worker jobs;
 agents inside those jobs own persistent `srun` steps, so Slurm applies the CPU
@@ -266,3 +268,7 @@ curl -H "Authorization: Bearer $SANDFLEET_METRICS_TOKEN" \
   "$SANDFLEET_URL/v1/metrics"
 sandfleet --token "$SANDFLEET_METRICS_TOKEN" metrics
 ```
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
