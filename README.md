@@ -65,6 +65,8 @@ Start with the [human guide](docs/human-guide.md) to deploy a controller,
 create pools, and connect client applications. See
 [the design notes](docs/design.md) for the resource model and
 [the production runbook](docs/production.md) for deployment and monitoring.
+For TMAX training, use the [integration guide](docs/tmax.md) for worker capacity,
+shared task images, credentials, and a backend smoke test.
 The [command reference](docs/commands.md) documents the CLI, controller, and
 agent entry points, controller restart recovery, and additional API features. Repository automation and coding agents should read
 [`AGENTS.md`](AGENTS.md) before changing the implementation. A generic
