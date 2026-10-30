@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sandfleet"
+version = "0.16.0"
+description = "Slurm-backed sandbox fleet service"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff==0.6.2"]
+
+[project.scripts]
+sandfleet = "sandfleet.cli:main"
+sandfleetd = "sandfleet.controller:main"
+sandfleet-agent = "sandfleet.agent:main"
+
+[tool.setuptools.packages.find]
+include = ["sandfleet*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

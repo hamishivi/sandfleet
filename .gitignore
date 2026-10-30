@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+.sandfleet/
+
+runtime/
+
+# Local credentials, operator configuration, and generated reports.
+.env
+.env.*
+!.env.example
+*.token
+*.pem
+*.key
+.ruff_cache/
+.coverage
+htmlcov/
+.DS_Store
