@@ -478,6 +478,14 @@ includes `network.mode`, `namespace`, `host_namespace`, `internet`, and
 
 ## Controller restart recovery
 
+Pool deletion waits for in-flight reconciliation and lease assignment before
+collecting jobs and leases to clean up. After a successful scheduler poll, the
+reconciler reclaims old submission records whose pool no longer exists. It
+cancels only their recorded submission IDs while they may still be live and
+forgets each record only after cancellation succeeds or the scheduler confirms
+the worker has finished outside the submission grace period. Cancellation
+errors remain visible and preserve the durable record for a later retry.
+
 Run the controller with `--registry /path/to/shared/service/endpoint.json` and the same
 persisted `--state-file` and role credentials on every restart. Set
 `SANDFLEET_REGISTRY=/path/to/shared/service/endpoint.json` in each client's environment

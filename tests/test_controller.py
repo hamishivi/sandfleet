@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -99,6 +100,220 @@ def new_state(launcher, **kwargs):
         scale_up_debounce_seconds=0,
         **kwargs,
     )
+
+
+def test_delete_pool_waits_for_an_inflight_submission(tmp_path, monkeypatch):
+    launcher = FakeLauncher()
+    state_path = tmp_path / "state.json"
+    state = new_state(launcher, state_file=str(state_path))
+    state.create_pool({"name": "example", "desired_capacity": 1, "slots_per_job": 1})
+    submitting, finish_submit, deleting, deleted = (threading.Event() for _ in range(4))
+    failures = []
+    submit = launcher.submit_worker_batch
+
+    def blocked_submit(**kwargs):
+        submitting.set()
+        assert finish_submit.wait(timeout=5)
+        return submit(**kwargs)
+
+    def reconcile():
+        try:
+            state.reconcile_once()
+        except BaseException as error:
+            failures.append(error)
+
+    def delete():
+        deleting.set()
+        try:
+            state.delete_pool("example")
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            deleted.set()
+
+    monkeypatch.setattr(launcher, "submit_worker_batch", blocked_submit)
+    reconciler = threading.Thread(target=reconcile)
+    deleter = threading.Thread(target=delete)
+    reconciler.start()
+    try:
+        assert submitting.wait(timeout=2)
+        deleter.start()
+        assert deleting.wait(timeout=2)
+        deleted_during_submit = deleted.wait(timeout=0.1)
+    finally:
+        finish_submit.set()
+        reconciler.join(timeout=5)
+        if deleter.ident is not None:
+            deleter.join(timeout=5)
+    assert not reconciler.is_alive() and not deleter.is_alive()
+    assert not failures
+    assert not deleted_during_submit
+    assert launcher.cancelled == ["100"]
+    assert not state.pools and not state.submissions
+    restored = new_state(launcher, state_file=str(state_path))
+    restored.reconcile_once()
+    assert not restored.pools and not restored.submissions
+
+
+def test_delete_pool_releases_an_inflight_assignment(monkeypatch):
+    launcher = FakeLauncher()
+    state = new_state(launcher)
+    state.create_pool({"name": "example", "desired_capacity": 1, "slots_per_job": 1})
+    state.reconcile_once()
+    state.request_lease("example", timeout_seconds=30)
+    state.register_agent(
+        {
+            "agent_id": "example-agent",
+            "pool": "example",
+            "url": "http://agent:9000",
+            "slots": 1,
+            "free_slots": 1,
+            "job_id": "100",
+            "node": "node.example",
+            "version": VERSION,
+        }
+    )
+    reserving, finish_reserve, deleting, deleted = (threading.Event() for _ in range(4))
+    failures, releases = [], []
+
+    def request(_url, path, **kwargs):
+        if path == "/v1/control/leases":
+            reserving.set()
+            assert finish_reserve.wait(timeout=5)
+            return {
+                "lease_id": "example-lease",
+                "lease_token": "synthetic",
+                "free_slots": 0,
+            }
+        assert path == "/v1/control/leases/example-lease"
+        assert kwargs["method"] == "DELETE"
+        releases.append(path)
+        return {"released": True, "free_slots": 1}
+
+    def assign():
+        try:
+            state._assign_pending()
+        except BaseException as error:
+            failures.append(error)
+
+    def delete():
+        deleting.set()
+        try:
+            state.delete_pool("example")
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            deleted.set()
+
+    monkeypatch.setattr("sandfleet.controller.request_json", request)
+    assigner = threading.Thread(target=assign)
+    deleter = threading.Thread(target=delete)
+    assigner.start()
+    try:
+        assert reserving.wait(timeout=2)
+        deleter.start()
+        assert deleting.wait(timeout=2)
+        deleted_during_reserve = deleted.wait(timeout=0.1)
+    finally:
+        finish_reserve.set()
+        assigner.join(timeout=5)
+        if deleter.ident is not None:
+            deleter.join(timeout=5)
+    assert not assigner.is_alive() and not deleter.is_alive()
+    assert not failures
+    assert not deleted_during_reserve
+    assert releases == ["/v1/control/leases/example-lease"]
+    assert launcher.cancelled == ["100"]
+    assert not state.pools and not state.leases and not state.submissions
+
+
+def orphaned_state(tmp_path, launcher):
+    """A late submission persisted after an older controller deleted its pool."""
+    state_path = tmp_path / "state.json"
+    state = new_state(launcher, state_file=str(state_path))
+    state.create_pool({"name": "example", "desired_capacity": 1, "slots_per_job": 1})
+    state.reconcile_once()
+    with state.lock:
+        state.pools.pop("example")
+        state._save_locked(force=True)
+    return state_path, new_state(launcher, state_file=str(state_path))
+
+
+def test_restart_reclaims_an_orphan_whose_worker_has_finished(tmp_path):
+    launcher = FakeLauncher()
+    state_path, restored = orphaned_state(tmp_path, launcher)
+    launcher.states.clear()
+    restored.reconcile_once()
+    assert not restored.submissions
+    assert not launcher.cancelled
+    again = new_state(launcher, state_file=str(state_path))
+    assert not again.pools and not again.submissions
+
+
+def test_restart_cancels_only_the_orphaned_submission(tmp_path):
+    launcher = FakeLauncher()
+    state_path, restored = orphaned_state(tmp_path, launcher)
+    restored.create_pool(
+        {
+            "name": "survivor",
+            "min_capacity": 0,
+            "warm_capacity": 0,
+            "max_capacity": 1,
+            "slots_per_job": 1,
+        }
+    )
+    launcher.states["unrelated"] = {"unrelated": "RUNNING"}
+    restored.reconcile_once()
+    assert launcher.cancelled == ["100"]
+    assert launcher.states == {"unrelated": {"unrelated": "RUNNING"}}
+    assert set(restored.pools) == {"survivor"}
+    assert not restored.submissions
+    again = new_state(launcher, state_file=str(state_path))
+    assert not again.submissions
+
+
+def test_orphan_cancellation_failure_retains_durable_ownership(tmp_path, monkeypatch):
+    launcher = FakeLauncher()
+    state_path, restored = orphaned_state(tmp_path, launcher)
+    cancel = launcher.cancel
+
+    def fail_cancel(_ids):
+        raise RuntimeError("synthetic cancellation failure")
+
+    monkeypatch.setattr(launcher, "cancel", fail_cancel)
+    with pytest.raises(RuntimeError, match="synthetic cancellation failure"):
+        restored.reconcile_once()
+    assert set(restored.submissions) == {"100"}
+    again = new_state(launcher, state_file=str(state_path))
+    assert set(again.submissions) == {"100"}
+    monkeypatch.setattr(launcher, "cancel", cancel)
+    again.reconcile_once()
+    assert launcher.cancelled == ["100"]
+    assert not again.submissions
+
+
+def test_pool_name_cannot_adopt_a_worker_awaiting_orphan_cleanup(tmp_path):
+    launcher = FakeLauncher()
+    _state_path, restored = orphaned_state(tmp_path, launcher)
+    with pytest.raises(ValueError, match="cleanup"):
+        restored.create_pool(
+            {"name": "example", "desired_capacity": 1, "slots_per_job": 1}
+        )
+    restored.reconcile_once()
+    restored.create_pool({"name": "example", "desired_capacity": 1, "slots_per_job": 1})
+
+
+def test_scheduler_failure_does_not_drop_or_cancel_orphans(tmp_path, monkeypatch):
+    launcher = FakeLauncher()
+    _state_path, restored = orphaned_state(tmp_path, launcher)
+    monkeypatch.setattr(
+        launcher,
+        "snapshot",
+        lambda _ids: SlurmSnapshot(ok=False, states={}, error="unavailable"),
+    )
+    restored.reconcile_once()
+    assert set(restored.submissions) == {"100"}
+    assert not launcher.cancelled
 
 
 def test_elastic_requests_are_coalesced_into_one_worker_batch():

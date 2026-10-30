@@ -683,6 +683,12 @@ class ControllerState:
                     f"Pool {spec.name!r} already exists with a different specification"
                 )
             return existing
+        if any(
+            submission.pool == spec.name for submission in self.submissions.values()
+        ):
+            raise ValueError(
+                f"Pool {spec.name!r} has worker submissions awaiting cleanup"
+            )
         if len(self.pools) >= self.max_pools:
             raise ValueError(f"Controller pool limit ({self.max_pools}) reached")
         aggregate_capacity = (
@@ -1359,7 +1365,11 @@ class ControllerState:
                 if submission.observe_scheduler(
                     states, now=now, grace_seconds=self.submission_grace_seconds
                 ):
-                    pool = self.pools[submission.pool]
+                    pool = self.pools.get(submission.pool)
+                    if pool is None:
+                        # A previous deletion race can leave an orphan. Cleanup
+                        # below owns it; there is no live pool to penalize.
+                        continue
                     backoff = min(
                         900,
                         self.min_submit_interval_seconds
@@ -1370,6 +1380,27 @@ class ControllerState:
                         now + backoff,
                     )
             return True
+
+    def _cleanup_orphan_submissions(self) -> None:
+        """Reclaim submissions left after a pool was removed by older code.
+
+        Called only after a successful scheduler snapshot. An absent worker
+        outside the submission grace period needs no cancellation; otherwise
+        cancel its recorded submission before forgetting ownership. Failures
+        remain visible and retain the durable record for a later retry.
+        """
+        with self.lock:
+            orphaned = [
+                submission
+                for submission in self.submissions.values()
+                if submission.pool not in self.pools
+            ]
+        for submission in orphaned:
+            if not submission.terminal:
+                self._cancel_jobs([submission.submission_id])
+            with self.lock:
+                self.submissions.pop(submission.submission_id)
+                self._save_locked(force=True)
 
     def _mark_timed_out_agents_locked(self, now: float) -> bool:
         changed = False
@@ -1793,6 +1824,8 @@ class ControllerState:
             now = time.time()
             self._start_gpu_capability_refresh()
             scheduler_ok = self._refresh_scheduler(now)
+            if scheduler_ok:
+                self._cleanup_orphan_submissions()
             self._reap_agents_and_requests(now, scheduler_ok=scheduler_ok)
             self._assign_pending()
             if scheduler_ok:
@@ -1953,6 +1986,13 @@ class ControllerState:
     # ---------- deletion and shutdown ----------
 
     def delete_pool(self, name: str) -> dict[str, Any]:
+        # A selected worker batch must be recorded before deletion collects its
+        # jobs, and an in-flight assignment must finish before collecting leases.
+        # Use the reconciler's lock order; never hold the state lock during RPCs.
+        with self.reconcile_lock, self.assignment_lock:
+            return self._delete_pool(name)
+
+    def _delete_pool(self, name: str) -> dict[str, Any]:
         with self.lock:
             pool = self.pools.get(name)
             if pool is None:

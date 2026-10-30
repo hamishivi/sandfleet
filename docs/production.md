@@ -8,6 +8,9 @@ not an Internet-facing or hostile multi-tenant service.
 - Python 3.11 or newer for the controller, agents, and persistent step workers.
   This applies to source/PYTHONPATH launches as well as installed packages.
   Sandfleet rejects older interpreters on import, before service startup.
+- The persistent step-worker's Linux Python build must provide `os.pidfd_open`,
+  `os.setns`, and `signal.pidfd_send_signal`. Verify the actual interpreter on
+  worker hosts; a version number alone does not prove these capabilities.
 - A stable controller hostname reachable from caller and worker nodes. Run the
   controller on a supervised service host, or put a stable private proxy/DNS
   name in front of a requeueable controller job.

@@ -95,6 +95,12 @@ git checkout --detach <reviewed-tag-or-commit>
 uv sync --frozen --no-dev --python /usr/bin/python3.12
 ```
 
+The step-worker interpreter must also expose Linux `os.pidfd_open`, `os.setns`,
+and `signal.pidfd_send_signal`. Some portable builds omit these APIs even when
+their version is recent enough. Select a suitable Linux interpreter for
+`SANDFLEET_WORKER_PYTHON`; namespace and process-identity checks must remain
+enabled.
+
 `uv` creates the release-local `.venv` and installs the locked Sandfleet
 package into it. The source files, lockfile, and `.venv` in this directory must
 remain unchanged for the deployment. The supplied job template does write
@@ -375,6 +381,12 @@ sandfleet pool resume train-a
 ```
 
 ## Shut down safely
+
+Pool deletion serializes with worker submission and lease assignment. It may
+wait for a bounded in-flight operation so that every new job and lease is
+included in cleanup. If cancellation fails, retain the pool/state and retry;
+do not remove state to make the error disappear. Restart recovery reclaims
+submission records left without a pool by older deletion races.
 
 Stop callers first, then delete their pools using the service/admin credential:
 

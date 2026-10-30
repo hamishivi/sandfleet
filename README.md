@@ -56,6 +56,11 @@ loads the newest valid generation, quarantines a corrupt primary, records the
 recovery in health and metrics, and refuses to start if no valid generation
 exists.
 
+Pool deletion waits for in-flight worker submissions and lease assignments,
+then cancels the recorded jobs before removing their pool. On restart, the
+reconciler also reclaims leftover submissions whose pool no longer exists;
+failed cancellation retains ownership and surfaces an error for retry.
+
 Start with the [human guide](docs/human-guide.md) to deploy a controller,
 create pools, and connect client applications. See
 [the design notes](docs/design.md) for the resource model and

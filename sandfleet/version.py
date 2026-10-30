@@ -8,4 +8,4 @@ if sys.version_info < (3, 11):
         f"found Python {sys.version_info[0]}.{sys.version_info[1]}"
     )
 
-VERSION = "0.16.0"
+VERSION = "0.16.1"
